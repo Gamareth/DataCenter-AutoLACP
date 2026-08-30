@@ -1,0 +1,14 @@
+bin/
+obj/
+dist/
+.vs/
+.idea/
+*.user
+*.suo
+*.dll
+*.pdb
+*.zip
+assets/workshop-preview-concept-*.png
+UserData/
+MelonLoader/
+Logs/

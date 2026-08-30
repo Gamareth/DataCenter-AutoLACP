@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <LangVersion>latest</LangVersion>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <NuGetAudit>false</NuGetAudit>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\TopologyModels.cs" Link="TopologyModels.cs" />
+    <Compile Include="..\LacpPlanner.cs" Link="LacpPlanner.cs" />
+    <Compile Include="..\WorkshopUpdateRules.cs" Link="WorkshopUpdateRules.cs" />
+  </ItemGroup>
+</Project>
