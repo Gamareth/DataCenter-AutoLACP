@@ -11,7 +11,7 @@ internal sealed class NativeLacpApplier
         _nativeLacp = nativeLacp;
     }
 
-    internal bool Apply(LacpDecision decision)
+    internal bool Apply(LacpDecision decision, NetworkSwitch anchorSwitch)
     {
         if (decision.Kind is LacpDecisionKind.NoOp or LacpDecisionKind.Skip)
             return true;
@@ -24,6 +24,13 @@ internal sealed class NativeLacpApplier
 
         try
         {
+            if (anchorSwitch is null
+                || (!string.Equals(anchorSwitch.GetDeviceId(), decision.AnchorSwitchId, StringComparison.Ordinal)
+                    && !string.Equals(anchorSwitch.switchId, decision.AnchorSwitchId, StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException("The supplied anchor switch does not match the LACP plan.");
+            }
+            GetRemoteEndpoint(decision);
             ValidateDesiredCables(map, decision);
         }
         catch (Exception exception)
@@ -37,7 +44,7 @@ internal sealed class NativeLacpApplier
         IReadOnlyList<NativeGroupSnapshot> backupGroups;
         try
         {
-            backupGroups = _nativeLacp.CaptureGroupsForPair(decision.Pair)
+            backupGroups = _nativeLacp.CaptureGroupsForPair(decision.Pair, decision.DesiredCableIds)
                 .ToArray();
         }
         catch (Exception exception)
@@ -67,9 +74,7 @@ internal sealed class NativeLacpApplier
             if (decision.Kind == LacpDecisionKind.Replace)
                 RemoveGroups(map, decision);
 
-            CreateGroup(map, decision);
-
-            RequestRouteEvaluation();
+            CreateGroup(map, decision, anchorSwitch);
             return true;
         }
         catch (Exception exception)
@@ -77,8 +82,13 @@ internal sealed class NativeLacpApplier
             AutoLacpLog.Error(
                 $"Native LACP apply failed for {decision.Pair}. " +
                 $"{exception.GetType().Name}: {exception.Message}");
-            TryRollback(map, decision.Pair, backupGroups);
+            TryRollback(map, decision.Pair, backupGroups, decision.DesiredCableIds);
             return false;
+        }
+        finally
+        {
+            // Native calls may partially mutate state before throwing, including rollback.
+            RequestRouteEvaluation();
         }
     }
 
@@ -107,7 +117,7 @@ internal sealed class NativeLacpApplier
         foreach (var groupId in decision.ExistingGroupIds)
             map.RemoveLACPGroup(groupId);
 
-        VerifyGroupsAbsent(decision.Pair, decision.ExistingGroupIds);
+        VerifyGroupsAbsent(decision.Pair, decision.ExistingGroupIds, decision.DesiredCableIds);
 
         if (CoopWorldSync.CoopActive && CoopWorldSync.IsHost)
         {
@@ -122,7 +132,7 @@ internal sealed class NativeLacpApplier
             $"{decision.Pair}.");
     }
 
-    private void CreateGroup(NetworkMap map, LacpDecision decision)
+    private void CreateGroup(NetworkMap map, LacpDecision decision, NetworkSwitch anchorSwitch)
     {
         if (decision.DesiredCableIds.Count < 2)
             throw new InvalidOperationException(
@@ -152,7 +162,7 @@ internal sealed class NativeLacpApplier
                 nativeCableIds);
         }
 
-        HarmonizeAnchorVlans(decision);
+        HarmonizeAnchorVlans(decision, anchorSwitch);
 
         AutoLacpLog.Info(
             $"Created native LACP group {groupId} for {decision.Pair} with " +
@@ -162,9 +172,10 @@ internal sealed class NativeLacpApplier
 
     private void VerifyGroupsAbsent(
         CanonicalEndpointPair pair,
-        IReadOnlyList<int> groupIds)
+        IReadOnlyList<int> groupIds,
+        IReadOnlyList<int> protectedCableIds)
     {
-        var remaining = _nativeLacp.CaptureGroupsForPair(pair);
+        var remaining = _nativeLacp.CaptureGroupsForPair(pair, protectedCableIds);
         if (remaining.Count > 0)
             throw new InvalidOperationException(
                 $"Native LACP group(s) " +
@@ -181,7 +192,7 @@ internal sealed class NativeLacpApplier
             throw new InvalidOperationException(
                 $"Native LACP creation returned invalid group ID {groupId}.");
 
-        var groups = _nativeLacp.CaptureGroupsForPair(pair);
+        var groups = _nativeLacp.CaptureGroupsForPair(pair, desiredCableIds);
         if (groups.Count != 1 || groups[0].GroupId != groupId)
             throw new InvalidOperationException(
                 $"Expected exactly native LACP group {groupId} after creation, " +
@@ -198,11 +209,12 @@ internal sealed class NativeLacpApplier
     private void TryRollback(
         NetworkMap map,
         CanonicalEndpointPair pair,
-        IReadOnlyList<NativeGroupSnapshot> backupGroups)
+        IReadOnlyList<NativeGroupSnapshot> backupGroups,
+        IReadOnlyList<int> protectedCableIds)
     {
         try
         {
-            var currentPairGroupIds = _nativeLacp.CaptureGroupsForPair(pair)
+            var currentPairGroupIds = _nativeLacp.CaptureGroupsForPair(pair, protectedCableIds)
                 .Select(group => group.GroupId)
                 .ToArray();
 
@@ -219,7 +231,7 @@ internal sealed class NativeLacpApplier
                     backup.GroupId);
             }
 
-            var restoredGroups = _nativeLacp.CaptureGroupsForPair(pair);
+            var restoredGroups = _nativeLacp.CaptureGroupsForPair(pair, protectedCableIds);
             var restoredExactly = restoredGroups.Count == backupGroups.Count
                 && backupGroups.All(backup => restoredGroups.Any(restored =>
                     restored.GroupId == backup.GroupId
@@ -240,7 +252,6 @@ internal sealed class NativeLacpApplier
             AutoLacpLog.Warning(
                 $"Restored {backupGroups.Count} prior native LACP group(s) " +
                 $"for {pair} after a failed apply.");
-            RequestRouteEvaluation();
         }
         catch (Exception rollbackException)
         {
@@ -336,13 +347,8 @@ internal sealed class NativeLacpApplier
         }
     }
 
-    private void HarmonizeAnchorVlans(LacpDecision decision)
+    private static void HarmonizeAnchorVlans(LacpDecision decision, NetworkSwitch networkSwitch)
     {
-        var networkSwitch = _nativeLacp.FindSwitch(decision.AnchorSwitchId);
-        if (networkSwitch is null)
-            throw new InvalidOperationException(
-                $"Anchor switch {decision.AnchorSwitchId} is unavailable.");
-
         if (decision.DesiredCableIds.Count < 2)
             return;
 

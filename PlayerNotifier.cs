@@ -4,16 +4,19 @@ namespace AutoLACP;
 
 internal static class PlayerNotifier
 {
-    internal static void Show(string message)
+    internal static void Show(string message, bool userRequested = false)
     {
+        if (!userRequested && !ModSettings.ShowNotifications)
+            return;
+
         try
         {
             var ui = StaticUIElements.instance;
-            if (ui is null || ui.messageQueue is null)
+            if (ui is null)
                 return;
 
-            ui.messageQueue.Enqueue($"<color=#00FFFF>[AutoLACP]</color> {message}");
-            ui.UpdateMessageDisplay();
+            // The native method owns both message storage and expiry bookkeeping.
+            ui.AddMeesageInField($"<color=#00FFFF>[AutoLACP]</color> {message}");
         }
         catch (Exception exception)
         {

@@ -18,7 +18,26 @@ tester, and date. Build success and dry-run discovery are not mutation proof.
 - [x] Unrelated groups are ignored.
 - [x] Pair identity is direction independent.
 
-## Proven in the final dry run
+## Version 1.0.1 regression checks
+
+The following automated checks use controlled native-game doubles; they do not
+replace in-game acceptance against IL2CPP.
+
+- [x] Missing or mismatched anchors cannot mutate groups.
+- [x] Partial apply and rollback failures still request native route evaluation.
+- [x] Known chain failures isolate the affected remote device.
+- [x] Unknown or overlapping malformed state prevents unsafe mutation.
+- [x] Pair capture failure does not skip other pairs on the same switch.
+- [x] Processing yields between pairs and resumes remaining work.
+- [x] Load reset discards partially processed switch work.
+- [x] A switch removed between frames is not mutated.
+- [x] Runtime notifications aggregate across batches for 30 seconds.
+- [x] Notification preferences suppress automatic messages, not manual explanations.
+- [ ] In-game message overflow followed by new server connections keeps working.
+- [ ] In-game load, live cable bursts, and patch-panel groups pass with this DLL.
+- [ ] Measure frame times on a large network; 6 ms is a soft scheduling budget.
+
+## Historical evidence: final 1.0.0 dry run
 
 - [x] Loaded cables enter through `RegisterCableConnection`.
 - [x] The load batch waits for the native readiness gate.
@@ -85,7 +104,7 @@ version 1.0.0 behavior. VLAN-specific acceptance is intentionally deferred.
 ## Release gates
 
 - [x] Release build has no compiler errors or code warnings.
-- [x] All 17 active pure tests pass on `net6.0`.
+- [x] All 34 planner, updater, and controlled game-boundary tests pass on `net6.0`.
 - [x] Production source contains no dry-run branch, probe label, or obsolete
       topology-snapshot implementation.
 - [x] No periodic scanner, removal hook, saved shadow state, or custom co-op

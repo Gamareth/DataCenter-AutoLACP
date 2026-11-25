@@ -36,8 +36,19 @@ after the first manual installation. Automatic updates can be disabled with
 - Only single-player or the authoritative co-op host may mutate LACP state.
 
 AutoLACP has no custom save data, recurring topology scan, pair-deduplication
-registry, custom cable-removal behavior, or custom network protocol. Its only
-setting controls automatic Workshop updates.
+registry, custom cable-removal behavior, or custom network protocol. Its
+settings control automatic Workshop updates and in-game notifications.
+
+## Notifications
+
+Set `ShowNotifications = false` in `UserData/AutoLACP.cfg` and restart the game
+to hide automatic load and runtime messages, including error notifications.
+The default is `true`. Logging and LACP processing remain active. Clicking an
+`[Auto]` button still displays its explanation.
+
+Messages use the native `AddMeesageInField` method to preserve the game's
+message expiry bookkeeping. Restart the game after updating from 1.0.0;
+the fix does not repair message queues in an already affected session.
 
 ## Build
 

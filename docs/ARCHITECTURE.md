@@ -51,6 +51,24 @@ Immediately before mutation, every desired cable must still exist and be
 complete. Existing group IDs are recaptured and must match the plan. Creation
 and removal are read back from the native registry.
 
+The coordinator retains one switch capture while processing its device pairs.
+The soft 6 ms budget is checked after each capture or pair, with at most 128 work
+items per frame. Native calls and a pair's apply/rollback transaction cannot be
+interrupted, so this is not a hard frame-time limit. Pair failures are logged and
+counted independently; the next pair still runs. Load/reset discards pending work.
+
+Before processing each pair, the coordinator resolves the original candidate
+lookup key again because the switch may have disappeared between frames. The
+applier validates and reuses that switch rather than looking it up by logical
+device ID. Every attempted mutation requests
+native route evaluation in a finally block, including unsuccessful rollback.
+
+A failed cable-chain read with a known remote endpoint excludes that entire
+remote device while allowing independent endpoints to proceed. An unidentified
+endpoint still stops processing for the switch. Malformed registry entries are
+ignored only when their known endpoints and cable membership prove independence
+from the requested pair; unknown or overlapping membership prevents mutation.
+
 If mutation or verification fails, the applier attempts to remove the partial
 result and restore the captured native groups with their original IDs and
 memberships. This backup exists only on the apply stack and is discarded after
@@ -77,8 +95,18 @@ validation item.
   execute native create or remove behavior.
 - Clients do not allocate or mutate LACP groups.
 - No periodic scanner, custom save format, custom network opcode, gameplay
-  setting, hotkey, or extra window exists. The only preference controls the
-  independent Workshop updater.
+  setting, hotkey, or extra window exists. Preferences control the independent
+  Workshop updater and automatic in-game notifications.
+- All player messages use native `AddMeesageInField`, which owns message and
+  expiry bookkeeping. `ShowNotifications = false` suppresses automatic messages
+  without suppressing logs or user-requested button explanations.
+
+## Verification scope
+
+The test suite executes the production coordinator, planner, reader, applier, and notifier
+against controlled game doubles for fault-path checks. These tests do not prove
+IL2CPP runtime behavior or native message-expiry handling. In-game acceptance
+must still cover message overflow, route evaluation, and patch-panel groups.
 
 ## Workshop updates
 

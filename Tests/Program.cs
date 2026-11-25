@@ -22,7 +22,8 @@ var tests = new (string Name, Action Run)[]
 };
 
 var failures = 0;
-foreach (var test in tests)
+var allTests = tests.Concat(NativeFailureTests.Cases).ToArray();
+foreach (var test in allTests)
 {
     try
     {
@@ -36,7 +37,7 @@ foreach (var test in tests)
     }
 }
 
-Console.WriteLine($"{tests.Length - failures}/{tests.Length} tests passed.");
+Console.WriteLine($"{allTests.Length - failures}/{allTests.Length} tests passed.");
 return failures == 0 ? 0 : 1;
 
 static CanonicalEndpointPair Pair() => new("Switch_A", "Server_B");

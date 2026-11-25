@@ -5,7 +5,8 @@ namespace AutoLACP;
 internal sealed class NativeLacpState
 {
     internal IReadOnlyList<NativeGroupSnapshot> CaptureGroupsForPair(
-        CanonicalEndpointPair requestedPair)
+        CanonicalEndpointPair requestedPair,
+        IReadOnlyList<int> protectedCableIds)
     {
         var groups = NetworkMap.instance?.GetAllLACPGroups();
         if (groups is null)
@@ -20,6 +21,15 @@ internal sealed class NativeLacpState
                 || string.IsNullOrWhiteSpace(group.deviceA)
                 || string.IsNullOrWhiteSpace(group.deviceB))
             {
+                if (group is not null && NativeGroupIsolation.IsUnrelated(
+                        requestedPair, protectedCableIds,
+                        group.deviceA, group.deviceB, CopyCableIds(group.cableIds)))
+                {
+                    AutoLacpLog.Warning(
+                        $"Native LACP group {entry.Key} has missing endpoints; " +
+                        $"its known cables are unrelated to {requestedPair} and it is left unchanged.");
+                    continue;
+                }
                 throw new InvalidOperationException(
                     $"Native LACP group {entry.Key} is malformed and cannot " +
                     "be reconciled safely.");
@@ -27,7 +37,16 @@ internal sealed class NativeLacpState
 
             var pair = new CanonicalEndpointPair(group.deviceA, group.deviceB);
             if (!pair.Equals(requestedPair))
+            {
+                if (group.cableIds is not null
+                    && CopyCableIds(group.cableIds).Any(protectedCableIds.Contains))
+                {
+                    throw new InvalidOperationException(
+                        $"Native LACP group {entry.Key} for another device pair " +
+                        "claims a cable required by this pair.");
+                }
                 continue;
+            }
             if (entry.Key != group.groupId)
             {
                 throw new InvalidOperationException(
@@ -46,13 +65,6 @@ internal sealed class NativeLacpState
         }
 
         return snapshots;
-    }
-
-    internal NetworkSwitch FindSwitch(string switchId)
-    {
-        if (string.IsNullOrWhiteSpace(switchId))
-            return null;
-        return NetworkMap.instance?.GetSwitchById(switchId);
     }
 
     private static IReadOnlyList<int> CopyCableIds(

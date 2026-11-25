@@ -29,6 +29,7 @@ internal sealed class ConnectedDevicesCapture
     internal int DecodedRecordCount { get; }
     internal int PatchPanelRecordCount { get; }
     internal int DecodeFailureCount { get; }
+    internal bool HasUnidentifiedFailure { get; }
     internal IReadOnlyList<string> RawSamples { get; }
     internal IReadOnlyList<ConnectedDeviceCables> Connections { get; }
 
@@ -40,6 +41,7 @@ internal sealed class ConnectedDevicesCapture
         int decodedRecordCount,
         int patchPanelRecordCount,
         int decodeFailureCount,
+        bool hasUnidentifiedFailure,
         IReadOnlyList<string> rawSamples,
         IReadOnlyList<ConnectedDeviceCables> connections)
     {
@@ -50,6 +52,7 @@ internal sealed class ConnectedDevicesCapture
         DecodedRecordCount = decodedRecordCount;
         PatchPanelRecordCount = patchPanelRecordCount;
         DecodeFailureCount = decodeFailureCount;
+        HasUnidentifiedFailure = hasUnidentifiedFailure;
         RawSamples = rawSamples;
         Connections = connections;
     }
@@ -85,6 +88,8 @@ internal sealed class NativeConnectedDeviceReader
         var decoded = 0;
         var patchPanelRecords = 0;
         var failures = 0;
+        var hasUnidentifiedFailure = false;
+        var blockedDevices = new HashSet<string>(StringComparer.Ordinal);
         var map = NetworkMap.instance;
         if (map is null)
             throw new InvalidOperationException("NetworkMap is unavailable.");
@@ -139,6 +144,7 @@ internal sealed class NativeConnectedDeviceReader
             catch (Exception exception)
             {
                 failures++;
+                hasUnidentifiedFailure = true;
                 AutoLacpLog.Warning(
                     $"GetConnectedDevices tuple {index} could not be read for " +
                     $"switch='{Describe(networkSwitch.switchId)}'; raw=" +
@@ -149,6 +155,7 @@ internal sealed class NativeConnectedDeviceReader
 
         if (nativeRecordCount > MaximumConnectionsPerSwitch)
         {
+            hasUnidentifiedFailure = true;
             failures += nativeRecordCount - MaximumConnectionsPerSwitch;
             AutoLacpLog.Warning(
                 $"GetConnectedDevices returned {nativeRecordCount} records for " +
@@ -178,6 +185,9 @@ internal sealed class NativeConnectedDeviceReader
                 catch (Exception exception)
                 {
                     failures++;
+                    // The remote endpoint is known: exclude all routes to that
+                    // device, but retain independently decoded connections.
+                    blockedDevices.Add(entry.Key);
                     AutoLacpLog.Warning(
                         $"Patch-panel cable chain could not be read for " +
                         $"switch='{Describe(networkSwitch.switchId)}', " +
@@ -188,6 +198,7 @@ internal sealed class NativeConnectedDeviceReader
         }
 
         var connections = cableIdsByDevice
+            .Where(entry => !blockedDevices.Contains(entry.Key))
             .OrderBy(entry => entry.Key, StringComparer.Ordinal)
             .Select(entry => new ConnectedDeviceCables(
                 entry.Key,
@@ -202,6 +213,7 @@ internal sealed class NativeConnectedDeviceReader
             decoded,
             patchPanelRecords,
             failures,
+            hasUnidentifiedFailure,
             rawSamples,
             connections);
     }

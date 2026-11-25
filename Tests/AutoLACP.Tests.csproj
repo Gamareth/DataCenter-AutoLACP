@@ -14,5 +14,11 @@
     <Compile Include="..\TopologyModels.cs" Link="TopologyModels.cs" />
     <Compile Include="..\LacpPlanner.cs" Link="LacpPlanner.cs" />
     <Compile Include="..\WorkshopUpdateRules.cs" Link="WorkshopUpdateRules.cs" />
+    <Compile Include="..\NativeGroupIsolation.cs" Link="NativeGroupIsolation.cs" />
+    <Compile Include="..\NativeLacpState.cs" Link="NativeLacpState.cs" />
+    <Compile Include="..\NativeLacpApplier.cs" Link="NativeLacpApplier.cs" />
+    <Compile Include="..\NativeConnectedDeviceReader.cs" Link="NativeConnectedDeviceReader.cs" />
+    <Compile Include="..\PlayerNotifier.cs" Link="PlayerNotifier.cs" />
+    <Compile Include="..\AutoLacpCoordinator.cs" Link="AutoLacpCoordinator.cs" />
   </ItemGroup>
 </Project>

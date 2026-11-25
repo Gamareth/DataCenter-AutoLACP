@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.1
+
+- Check the soft frame budget between device pairs as well as switch captures.
+  Native calls and each apply/rollback transaction remain indivisible.
+- Continue with other pairs on a switch after a pair-specific processing failure.
+- Added coordinator regression checks for yielding/resuming, load reset, removed
+  switches, pair failure isolation, and 30-second notification aggregation.
+- Validate and reuse the captured anchor switch before changing native groups,
+  avoiding a second lookup with potentially different registry and device IDs.
+- Request native route evaluation after every attempted mutation, including
+  failed rollback after partial changes.
+- Isolate cable-chain failures with known endpoints to the affected remote
+  device. Unknown endpoints still stop that switch's processing safely.
+- Preserve and skip provably unrelated malformed groups; unknown membership
+  and overlapping cable ownership still prevent mutation.
+- Added fault-path tests for native apply, rollback, connection decoding, and
+  notification delivery using controlled game doubles.
+- Route player messages through native `AddMeesageInField` so the game keeps
+  message entries and expiry times synchronized.
+- Added `ShowNotifications` (default `true`) to disable automatic in-game
+  messages while preserving logs, processing, and user-requested explanations.
+- Kept cable-batch processing immediate while grouping runtime player feedback
+  into one 30-second activity summary.
+- Added unique switch-capable device and AutoLACP evaluation counts to the
+  grouped summary without adding a native route-evaluation hook.
+- Retained detailed per-batch logging for diagnosis.
+
 ## 1.0.0
 
 - Added automatic Steam Workshop updates after the first manual installation,

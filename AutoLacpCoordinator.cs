@@ -8,7 +8,8 @@ internal static class AutoLacpCoordinator
 {
     private const float QuietPeriodSeconds = 1f;
     private const float MaximumBatchSeconds = 5f;
-    private const int MaximumCandidatesPerFrame = 128;
+    private const float RuntimeNotificationWindowSeconds = 30f;
+    private const int MaximumWorkItemsPerFrame = 128;
     private const double ProcessingBudgetMilliseconds = 6d;
     private const int MaximumDiagnosticSwitchSamples = 3;
 
@@ -34,6 +35,8 @@ internal static class AutoLacpCoordinator
         internal int PlannerSkips { get; set; }
         internal int ApplyFailures { get; set; }
         internal int DiagnosticSwitchSamples { get; set; }
+        internal ConnectedDevicesCapture CurrentCapture { get; set; }
+        internal int NextConnectionIndex { get; set; }
 
         internal SwitchRun(
             IEnumerable<string> candidateDeviceIds,
@@ -50,10 +53,36 @@ internal static class AutoLacpCoordinator
         }
     }
 
+    private sealed class RuntimeNotificationWindow
+    {
+        internal HashSet<string> SwitchIds { get; } = new(
+            StringComparer.Ordinal);
+        internal bool IsScheduled { get; set; }
+        internal float DueTime { get; set; }
+        internal int CableConnections { get; set; }
+        internal int Evaluations { get; set; }
+        internal int CreatedGroups { get; set; }
+        internal int ExtendedGroups { get; set; }
+        internal int Errors { get; set; }
+
+        internal void Reset()
+        {
+            SwitchIds.Clear();
+            IsScheduled = false;
+            DueTime = 0f;
+            CableConnections = 0;
+            Evaluations = 0;
+            CreatedGroups = 0;
+            ExtendedGroups = 0;
+            Errors = 0;
+        }
+    }
+
     private static readonly HashSet<int> PendingCableIds = new();
     private static readonly HashSet<string> PendingDeviceIds = new(
         StringComparer.Ordinal);
     private static readonly HashSet<int> UnresolvedCableRegistrations = new();
+    private static readonly RuntimeNotificationWindow RuntimeNotifications = new();
 
     private static NativeConnectedDeviceReader _connectedDevices;
     private static NativeLacpState _nativeLacp;
@@ -137,7 +166,8 @@ internal static class AutoLacpCoordinator
         PlayerNotifier.Show(
             "LACP is managed automatically. The full network is checked when " +
             "the game is loaded, and affected devices are rechecked whenever " +
-            "one or more new cable connections are made.");
+            "one or more new cable connections are made.",
+            userRequested: true);
     }
 
     internal static void Update()
@@ -147,6 +177,13 @@ internal static class AutoLacpCoordinator
 
         if (!NativeGameState.MayMutate())
             return;
+
+        if (_activeRun is null
+            && RuntimeNotifications.IsScheduled
+            && Time.realtimeSinceStartup >= RuntimeNotifications.DueTime)
+        {
+            FlushRuntimeNotification();
+        }
 
         if (_activeRun is not null)
         {
@@ -234,6 +271,15 @@ internal static class AutoLacpCoordinator
                     "were reported without connected device IDs; no LACP " +
                     "changes applied. See log.");
             }
+            else
+            {
+                AccumulateRuntimeNotification(
+                    cableIds.Length,
+                    Array.Empty<string>(),
+                    createdGroups: 0,
+                    extendedGroups: 0,
+                    errors: Math.Max(1, unresolvedCableRegistrations));
+            }
             return;
         }
 
@@ -248,10 +294,13 @@ internal static class AutoLacpCoordinator
     {
         var stopwatch = Stopwatch.StartNew();
         for (var processed = 0;
-             processed < MaximumCandidatesPerFrame && _activeRun is not null;
+             processed < MaximumWorkItemsPerFrame && _activeRun is not null;
              processed++)
         {
-            ProcessNextSwitchCandidate();
+            if (_activeRun.CurrentCapture is not null)
+                ProcessNextConnection(_activeRun);
+            else
+                ProcessNextSwitchCandidate();
             if (stopwatch.Elapsed.TotalMilliseconds >= ProcessingBudgetMilliseconds)
                 break;
         }
@@ -306,18 +355,20 @@ internal static class AutoLacpCoordinator
                     run.DiagnosticSwitchSamples++;
             }
 
-            if (capture.DecodeFailureCount > 0)
+            if (capture.HasUnidentifiedFailure)
             {
                 run.Skipped++;
                 AutoLacpLog.Warning(
                     $"Switch='{Describe(switchKey)}' produced " +
                     $"{capture.DecodeFailureCount} undecodable record(s); " +
-                    "planning for this switch is skipped because the native " +
-                    "result was incomplete.");
+                    "planning for this switch is skipped because at least one " +
+                    "failed connection could not be isolated to a remote device.");
                 return;
             }
 
-            PlanSwitchConnections(capture, run);
+            // Retain only this switch's snapshot while yielding between pairs.
+            run.CurrentCapture = capture;
+            run.NextConnectionIndex = 0;
         }
         catch (Exception exception)
         {
@@ -330,7 +381,7 @@ internal static class AutoLacpCoordinator
         }
         finally
         {
-            if (run.CandidateDeviceIds.Count == 0)
+            if (run.CandidateDeviceIds.Count == 0 && run.CurrentCapture is null)
                 FinishActiveRun();
         }
     }
@@ -361,29 +412,39 @@ internal static class AutoLacpCoordinator
             $"connections={string.Join("; ", groups)}");
     }
 
-    private static void PlanSwitchConnections(
-        ConnectedDevicesCapture capture,
-        SwitchRun run)
+    private static void ProcessNextConnection(SwitchRun run)
     {
+        var capture = run.CurrentCapture;
+        if (run.NextConnectionIndex >= capture.Connections.Count)
+        {
+            run.CurrentCapture = null;
+            if (run.CandidateDeviceIds.Count == 0)
+                FinishActiveRun();
+            return;
+        }
+
+        var connection = capture.Connections[run.NextConnectionIndex++];
+        if (IsSelf(capture, connection.DeviceId) || connection.RouteCount < 2)
+            return;
+
         var localDeviceId = !string.IsNullOrWhiteSpace(capture.DeviceId)
             ? capture.DeviceId
             : !string.IsNullOrWhiteSpace(capture.SwitchId)
                 ? capture.SwitchId
                 : capture.CandidateDeviceId;
 
-        foreach (var connection in capture.Connections)
+        try
         {
-            if (IsSelf(capture, connection.DeviceId)
-                || connection.RouteCount < 2)
-            {
-                continue;
-            }
-
             run.ParallelConnectionObservations++;
+            // A frame may have passed since capture. Resolve the original lookup
+            // key again so a removed switch cannot be mutated through an old proxy.
+            var anchorSwitch = NetworkMap.instance?.GetSwitchById(capture.CandidateDeviceId);
+            if (anchorSwitch is null)
+                throw new InvalidOperationException("The captured switch is no longer available.");
             var pair = new CanonicalEndpointPair(
                 localDeviceId,
                 connection.DeviceId);
-            var existingGroups = _nativeLacp.CaptureGroupsForPair(pair);
+            var existingGroups = _nativeLacp.CaptureGroupsForPair(pair, connection.CableIds);
             var decision = LacpPlanner.BuildConnectedDeviceDecision(
                 pair,
                 localDeviceId,
@@ -395,13 +456,23 @@ internal static class AutoLacpCoordinator
                 $"cables={AutoLacpLog.DescribeCableIds(decision.DesiredCableIds)} " +
                 $"existingGroups=[{string.Join(",", decision.ExistingGroupIds)}] " +
                 $"decision={decision.Kind} reason='{decision.Reason}'.");
-            HandleDecision(decision, run);
+            HandleDecision(decision, run, anchorSwitch);
+        }
+        catch (Exception exception)
+        {
+            run.Skipped++;
+            run.ProcessingFailures++;
+            AutoLacpLog.Warning(
+                $"Failed while processing pair '{Describe(localDeviceId)}' <-> " +
+                $"'{Describe(connection.DeviceId)}'. " +
+                $"{exception.GetType().Name}: {exception.Message}\n{exception}");
         }
     }
 
     private static void HandleDecision(
         LacpDecision decision,
-        SwitchRun run)
+        SwitchRun run,
+        NetworkSwitch anchorSwitch)
     {
         if (decision.Kind == LacpDecisionKind.NoOp)
         {
@@ -418,7 +489,7 @@ internal static class AutoLacpCoordinator
         _isApplying = true;
         try
         {
-            if (!_applier.Apply(decision))
+            if (!_applier.Apply(decision, anchorSwitch))
             {
                 run.Skipped++;
                 run.ApplyFailures++;
@@ -468,17 +539,21 @@ internal static class AutoLacpCoordinator
             $"{run.CandidateCount}, non-switchable={run.NonSwitchable}, " +
             $"unique switches processed={run.SwitchesProcessed}, " +
             $"connected records decoded={run.ConnectedRecords}, " +
-            $"tuple failures={run.DecodeFailures}, " +
+            $"connection read failures={run.DecodeFailures}, " +
             $"parallel connection observations={run.ParallelConnectionObservations}, " +
             $"groups added={run.CreatedGroups}, " +
             $"groups extended={run.ExtendedGroups}, " +
             $"unchanged={run.Unchanged}, skipped={run.Skipped}.";
         AutoLacpLog.Info(diagnostics);
 
-        var errors = run.Trigger == "post-load"
-            ? BuildLoadErrors(run)
-            : new List<string>();
-        var summary = BuildPlayerSummary(run, errors.Count);
+        if (run.Trigger != "post-load")
+        {
+            AccumulateRuntimeNotification(run);
+            return;
+        }
+
+        var errors = BuildLoadErrors(run);
+        var summary = BuildLoadPlayerSummary(run, errors.Count);
         AutoLacpLog.Info(summary);
         PlayerNotifier.Show(summary);
         for (var index = 0; index < errors.Count; index++)
@@ -486,6 +561,117 @@ internal static class AutoLacpCoordinator
             PlayerNotifier.Show(
                 $"Load error {index + 1}/{errors.Count}: {errors[index]}");
         }
+    }
+
+    private static void AccumulateRuntimeNotification(SwitchRun run)
+    {
+        AccumulateRuntimeNotification(
+            run.CableCount,
+            run.ProcessedSwitchIds,
+            run.CreatedGroups,
+            run.ExtendedGroups,
+            run.UnresolvedCableRegistrations
+                + run.DecodeFailures
+                + run.ProcessingFailures
+                + run.PlannerSkips
+                + run.ApplyFailures);
+    }
+
+    private static void AccumulateRuntimeNotification(
+        int cableConnections,
+        IEnumerable<string> switchIds,
+        int createdGroups,
+        int extendedGroups,
+        int errors)
+    {
+        if (!RuntimeNotifications.IsScheduled)
+        {
+            RuntimeNotifications.IsScheduled = true;
+            RuntimeNotifications.DueTime =
+                Time.realtimeSinceStartup + RuntimeNotificationWindowSeconds;
+        }
+
+        RuntimeNotifications.SwitchIds.UnionWith(switchIds);
+        RuntimeNotifications.CableConnections += cableConnections;
+        RuntimeNotifications.Evaluations++;
+        RuntimeNotifications.CreatedGroups += createdGroups;
+        RuntimeNotifications.ExtendedGroups += extendedGroups;
+        RuntimeNotifications.Errors += errors;
+    }
+
+    private static void FlushRuntimeNotification()
+    {
+        var cableConnections = RuntimeNotifications.CableConnections;
+        var switchCount = RuntimeNotifications.SwitchIds.Count;
+        var evaluations = RuntimeNotifications.Evaluations;
+        var createdGroups = RuntimeNotifications.CreatedGroups;
+        var extendedGroups = RuntimeNotifications.ExtendedGroups;
+        var errors = RuntimeNotifications.Errors;
+        RuntimeNotifications.Reset();
+
+        var summary = BuildRuntimePlayerSummary(
+            cableConnections,
+            switchCount,
+            evaluations,
+            createdGroups,
+            extendedGroups,
+            errors);
+        AutoLacpLog.Info(
+            $"30-second activity window complete: cable connections=" +
+            $"{cableConnections}, unique switch-capable devices={switchCount}, " +
+            $"evaluations={evaluations}, groups added={createdGroups}, " +
+            $"groups extended={extendedGroups}, errors={errors}.");
+        AutoLacpLog.Info(summary);
+        PlayerNotifier.Show(summary);
+    }
+
+    private static string BuildRuntimePlayerSummary(
+        int cableConnections,
+        int switchCount,
+        int evaluations,
+        int createdGroups,
+        int extendedGroups,
+        int errors)
+    {
+        var subject =
+            $"{cableConnections} " +
+            $"{Pluralize(cableConnections, "cable connection")} processed " +
+            $"across {switchCount} " +
+            $"{Pluralize(switchCount, "switch-capable device")} in " +
+            $"{evaluations} {Pluralize(evaluations, "evaluation")}";
+
+        string outcome;
+        if (createdGroups > 0 && extendedGroups > 0)
+        {
+            outcome =
+                $"{createdGroups} {Pluralize(createdGroups, "LACP group")} " +
+                $"added and {extendedGroups} extended";
+        }
+        else if (createdGroups > 0)
+        {
+            outcome =
+                $"{createdGroups} {Pluralize(createdGroups, "LACP group")} added";
+        }
+        else if (extendedGroups > 0)
+        {
+            outcome =
+                $"{extendedGroups} " +
+                $"{Pluralize(extendedGroups, "LACP group")} extended";
+        }
+        else
+        {
+            outcome = errors == 0
+                ? "no LACP changes"
+                : "no LACP changes applied";
+        }
+
+        if (errors > 0)
+        {
+            outcome +=
+                $"; {errors} {Pluralize(errors, "error")} occurred. See log";
+        }
+
+        return $"{subject}: {outcome}.";
     }
 
     private static string Describe(string value) =>
@@ -499,18 +685,13 @@ internal static class AutoLacpCoordinator
             (sample.Length == maximum ? ", ...]" : "]");
     }
 
-    private static string BuildPlayerSummary(
+    private static string BuildLoadPlayerSummary(
         SwitchRun run,
         int errorCategoryCount)
     {
-        var isLoad = run.Trigger == "post-load";
-        var subject = isLoad
-            ? $"Loaded network processed across {run.SwitchesProcessed} " +
-                Pluralize(run.SwitchesProcessed, "switch-capable device")
-            : $"{run.CableCount} new " +
-                $"{Pluralize(run.CableCount, "cable connection")} processed " +
-                $"across {run.SwitchesProcessed} " +
-                Pluralize(run.SwitchesProcessed, "switch-capable device");
+        var subject =
+            $"Loaded network processed across {run.SwitchesProcessed} " +
+            Pluralize(run.SwitchesProcessed, "switch-capable device");
 
         var changes = new List<string>();
         if (run.CreatedGroups > 0)
@@ -532,15 +713,10 @@ internal static class AutoLacpCoordinator
                 ? "no LACP changes needed"
                 : "no LACP changes applied"
             : string.Join(", ", changes);
-        if (isLoad && errorCategoryCount > 0)
+        if (errorCategoryCount > 0)
         {
             outcome += $"; {errorCategoryCount} " +
                 $"{Pluralize(errorCategoryCount, "error")} found";
-        }
-        else if (run.Skipped > 0)
-        {
-            outcome += $", {run.Skipped} " +
-                $"{Pluralize(run.Skipped, "check")} skipped; see log";
         }
         return $"{subject}: {outcome}.";
     }
@@ -559,7 +735,7 @@ internal static class AutoLacpCoordinator
         if (run.DecodeFailures > 0)
         {
             errors.Add(
-                $"{run.DecodeFailures} connected-device " +
+                $"{run.DecodeFailures} connected-device or cable-chain " +
                 $"{Pluralize(run.DecodeFailures, "record")} could not be read; " +
                 "affected LACP checks were skipped.");
         }
@@ -567,7 +743,7 @@ internal static class AutoLacpCoordinator
         {
             errors.Add(
                 $"Processing failed for {run.ProcessingFailures} " +
-                $"{Pluralize(run.ProcessingFailures, "switch-capable device")}; " +
+                $"{Pluralize(run.ProcessingFailures, "switch or device-pair check")}; " +
                 "affected LACP checks were skipped.");
         }
         if (run.PlannerSkips > 0)
@@ -663,5 +839,6 @@ internal static class AutoLacpCoordinator
         _batchScheduled = false;
         _batchFirstEventTime = 0f;
         _batchDueTime = 0f;
+        RuntimeNotifications.Reset();
     }
 }
